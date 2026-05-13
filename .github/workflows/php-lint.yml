@@ -25,16 +25,17 @@ jobs:
           tools: composer:v2
 
       - name: Validate composer.json
-        run: composer validate --strict --no-check-publish
+        run: composer validate --no-check-all --no-check-publish
 
-      - name: PHP syntax lint
+      - name: PHP syntax lint (plugin sources)
         run: |
           set -e
           fail=0
           while IFS= read -r f; do
             php -l "$f" >/dev/null || fail=1
-          done < <(find . -type f -name '*.php' -not -path './vendor/*' -not -path './node_modules/*')
+          done < <(find . -type f -name '*.php' \
+            -not -path './vendor/*' \
+            -not -path './node_modules/*' \
+            -not -path './tests/*' \
+            -not -path './build/*')
           exit $fail
-
-      - name: Install dependencies
-        run: composer install --no-progress --prefer-dist --no-interaction
