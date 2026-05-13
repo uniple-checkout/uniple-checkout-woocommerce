@@ -1,0 +1,22 @@
+{
+  "name": "uniple/checkout-woocommerce",
+  "description": "JPYC stablecoin hosted checkout for WooCommerce, powered by uniple.",
+  "type": "wordpress-plugin",
+  "license": "GPL-2.0-or-later",
+  "require": {
+    "php": ">=8.1"
+  },
+  "autoload": {
+    "psr-4": {
+      "Uniple\\CheckoutWooCommerce\\": "src/"
+    }
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "preferred-install": "dist",
+    "sort-packages": true
+  },
+  "scripts": {
+    "build": "@composer install --no-dev --optimize-autoloader"
+  }
+}
