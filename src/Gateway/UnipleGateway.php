@@ -100,6 +100,26 @@ final class UnipleGateway extends WC_Payment_Gateway
         ];
     }
 
+    public function admin_options()
+    {
+        $apiKey = (string) $this->get_option('api_key', '');
+        if ($apiKey === '') {
+            echo '<div class="notice notice-info inline"><p>';
+            echo wp_kses_post(
+                sprintf(
+                    /* translators: %s: merchant application form URL */
+                    __(
+                        'uniple checkout requires a merchant account. <a href="%s" target="_blank" rel="noopener noreferrer">Apply for an account</a> and uniple will issue your API key and webhook secret.',
+                        'uniple-checkout-for-woocommerce'
+                    ),
+                    esc_url('https://forms.gle/b8kwVZeynA1ffV8j6')
+                )
+            );
+            echo '</p></div>';
+        }
+        parent::admin_options();
+    }
+
     /**
      * Secret field の mask 維持 + capability gate (= manage_woocommerce)。
      *

@@ -4,7 +4,7 @@ Tags: woocommerce, payment, checkout, stablecoin, japan
 Requires at least: 6.4
 Tested up to: 6.9
 Requires PHP: 8.1
-Stable tag: 0.1.0
+Stable tag: 0.1.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -34,10 +34,22 @@ This plugin is built for WooCommerce stores. It is not developed by, affiliated 
 2. Activate "uniple checkout for WooCommerce" from the WordPress Plugins screen.
 3. Go to WooCommerce > Settings > Payments.
 4. Enable "uniple checkout (JPYC)".
-5. Enter the API key and webhook secret issued by your uniple administrator.
+5. Enter the API key and webhook secret issued by your uniple administrator (apply for an account at https://forms.gle/b8kwVZeynA1ffV8j6 if you do not have one yet).
 6. Confirm the API base URL is `https://uniple.io` for live use, then save.
 
+== How to obtain an API key ==
+
+uniple checkout requires a merchant account with uniple. Apply for an account at:
+
+https://forms.gle/b8kwVZeynA1ffV8j6
+
+After your application is approved, uniple will issue your API key and webhook secret, which you enter in the plugin settings (WooCommerce → Settings → Payments → uniple checkout (JPYC)).
+
 == Frequently Asked Questions ==
+
+= How do I obtain the API key and webhook secret? =
+
+Apply for a uniple merchant account at https://forms.gle/b8kwVZeynA1ffV8j6. After approval, your API key and webhook secret will be issued to you.
 
 = Does this plugin support Checkout Blocks? =
 
@@ -85,6 +97,10 @@ No screenshots are included in this release.
 
 == Changelog ==
 
+= 0.1.1 =
+
+* Added merchant application form link to plugin settings and documentation.
+
 = 0.1.0 =
 
 * Initial release.
@@ -96,6 +112,10 @@ No screenshots are included in this release.
 * Added masked admin fields for API key and webhook secret.
 
 == Upgrade Notice ==
+
+= 0.1.1 =
+
+Added merchant application form link.
 
 = 0.1.0 =
 
