@@ -4,7 +4,7 @@ Tags: woocommerce, payment, checkout, stablecoin, japan
 Requires at least: 6.4
 Tested up to: 6.9
 Requires PHP: 8.1
-Stable tag: 0.1.1
+Stable tag: 0.1.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -97,6 +97,10 @@ No screenshots are included in this release.
 
 == Changelog ==
 
+= 0.1.2 =
+
+* Added Japanese (ja) translation bundled in /languages.
+
 = 0.1.1 =
 
 * Added merchant application form link to plugin settings and documentation.
@@ -112,6 +116,10 @@ No screenshots are included in this release.
 * Added masked admin fields for API key and webhook secret.
 
 == Upgrade Notice ==
+
+= 0.1.2 =
+
+Added Japanese translation.
 
 = 0.1.1 =
 

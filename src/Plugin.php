@@ -13,7 +13,7 @@ defined('ABSPATH') || exit;
 
 final class Plugin
 {
-    public const VERSION = '0.1.1';
+    public const VERSION = '0.1.2';
     public const PLUGIN_ID = 'uniple';
 
     public static function boot(): void
