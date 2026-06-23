@@ -24,6 +24,7 @@ namespace Uniple\CheckoutWooCommerce\Gateway;
 use Uniple\CheckoutWooCommerce\Admin\SettingsSanitizer;
 use Uniple\CheckoutWooCommerce\Api\UnipleClient;
 use Uniple\CheckoutWooCommerce\Plugin;
+use Uniple\CheckoutWooCommerce\X402\ProductSync;
 use WC_Order;
 use WC_Payment_Gateway;
 
@@ -114,6 +115,10 @@ final class UnipleGateway extends WC_Payment_Gateway
                 'default' => '',
                 'description' => __('HMAC-SHA256 webhook signing secret. Stored masked; re-enter to update.', 'uniple-checkout-for-woocommerce'),
             ],
+            'x402_sync' => [
+                'title' => __('x402 / AI購入 商品同期', 'uniple-checkout-for-woocommerce'),
+                'type' => 'x402_sync',
+            ],
         ];
     }
 
@@ -193,6 +198,12 @@ final class UnipleGateway extends WC_Payment_Gateway
             return false;
         }
 
+        $syncKey = 'woocommerce_'.$this->id.'_x402_sync';
+        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Verified by WooCommerce settings API (WC_Admin_Settings) before process_admin_options() runs.
+        if (isset($_POST[$syncKey])) {
+            $this->runX402ProductSync();
+        }
+
         return $result;
     }
 
@@ -229,15 +240,33 @@ final class UnipleGateway extends WC_Payment_Gateway
     }
 
     /**
-     * @return array<string,string>|null
+     * @param string $key
+     * @param array<string,mixed> $data
+     */
+    public function generate_x402_sync_html($key, $data): string
+    {
+        $buttonName = esc_attr('woocommerce_'.$this->id.'_x402_sync');
+
+        return '<tr valign="top">'
+            .'<th scope="row" class="titledesc">'.esc_html((string) ($data['title'] ?? 'x402 / AI購入 商品同期')).'</th>'
+            .'<td class="forminp">'
+            .'<p>WooCommerceの商品マスタをunipleの商品catalogへ同期します。公開中・購入可能・在庫ありの商品は「有効」として同期されます。</p>'
+            .'<p class="description">通常のHosted Checkout / LINE / WalletConnect決済フローは変更されません。</p>'
+            .'<button type="submit" class="button" name="'.$buttonName.'" value="1">x402商品同期</button>'
+            .'</td></tr>';
+    }
+
+    /**
+     * @return array<string,string>
      */
     public function process_payment($order_id)
     {
         $order = wc_get_order($order_id);
         if (!$order instanceof WC_Order) {
-            wc_add_notice(__('Order not found.', 'uniple-checkout-for-woocommerce'), 'error');
+            $message = __('Order not found.', 'uniple-checkout-for-woocommerce');
+            wc_add_notice($message, 'error');
 
-            return null;
+            return $this->paymentFailure($message);
         }
 
         $client = new UnipleClient($this->clientConfig());
@@ -249,9 +278,10 @@ final class UnipleGateway extends WC_Payment_Gateway
                 '[uniple-checkout] amount not integer JPYC: '.$e->getMessage(),
                 ['source' => 'uniple-checkout', 'order_id' => $order->get_id()]
             );
-            wc_add_notice(__('Order amount must be an integer JPYC value.', 'uniple-checkout-for-woocommerce'), 'error');
+            $message = __('Order amount must be an integer JPYC value.', 'uniple-checkout-for-woocommerce');
+            wc_add_notice($message, 'error');
 
-            return null;
+            return $this->paymentFailure($message);
         }
 
         $returnUrl = add_query_arg(
@@ -263,6 +293,7 @@ final class UnipleGateway extends WC_Payment_Gateway
             home_url('/')
         );
         $webhookUrl = rest_url('uniple/v1/webhook');
+        $cancelUrl = wc_get_checkout_url();
 
         try {
             $session = $client->createSession([
@@ -274,7 +305,7 @@ final class UnipleGateway extends WC_Payment_Gateway
                     (string) $order->get_order_number()
                 ),
                 'successUrl' => $returnUrl,
-                'cancelUrl' => $order->get_cancel_order_url_raw(),
+                'cancelUrl' => $cancelUrl,
                 'webhookUrl' => $webhookUrl,
             ]);
         } catch (\Throwable $e) {
@@ -282,9 +313,10 @@ final class UnipleGateway extends WC_Payment_Gateway
                 '[uniple-checkout] createSession failed: '.$e->getMessage(),
                 ['source' => 'uniple-checkout', 'order_id' => $order->get_id()]
             );
-            wc_add_notice(__('Payment gateway is temporarily unavailable. Please try again.', 'uniple-checkout-for-woocommerce'), 'error');
+            $message = __('Payment gateway is temporarily unavailable. Please try again.', 'uniple-checkout-for-woocommerce');
+            wc_add_notice($message, 'error');
 
-            return null;
+            return $this->paymentFailure($message);
         }
 
         $order->update_meta_data('_uniple_session_id', $session['sessionId']);
@@ -295,6 +327,17 @@ final class UnipleGateway extends WC_Payment_Gateway
         return [
             'result' => 'success',
             'redirect' => $session['checkoutUrl'],
+        ];
+    }
+
+    /**
+     * @return array{result:string,message:string}
+     */
+    private function paymentFailure(string $message): array
+    {
+        return [
+            'result' => 'failure',
+            'message' => $message,
         ];
     }
 
@@ -310,5 +353,36 @@ final class UnipleGateway extends WC_Payment_Gateway
             'api_base_url' => (string) $this->get_option('api_base_url', 'https://uniple.io'),
             'mode' => (string) $this->get_option('mode', 'live'),
         ];
+    }
+
+    private function runX402ProductSync(): void
+    {
+        try {
+            $client = new UnipleClient($this->clientConfig());
+            $result = (new ProductSync())->syncAll($client);
+            $message = sprintf(
+                'x402商品同期を実行しました。同期: %d件 / 有効: %d件 / 無効: %d件 / 同期対象外: %d件',
+                $result['synced'],
+                $result['active'],
+                $result['inactive'],
+                $result['skipped']
+            );
+            if (class_exists('\WC_Admin_Settings')) {
+                \WC_Admin_Settings::add_message($message);
+            } else {
+                wc_add_notice($message, 'success');
+            }
+        } catch (\Throwable $e) {
+            wc_get_logger()->error(
+                '[uniple-checkout] x402 product sync failed: '.$e->getMessage(),
+                ['source' => 'uniple-checkout']
+            );
+            $message = 'x402商品同期に失敗しました: '.$e->getMessage();
+            if (class_exists('\WC_Admin_Settings')) {
+                \WC_Admin_Settings::add_error($message);
+            } else {
+                wc_add_notice($message, 'error');
+            }
+        }
     }
 }

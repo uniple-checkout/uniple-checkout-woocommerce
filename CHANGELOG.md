@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-23
+
+### Added
+
+- Manual x402 product catalog sync from WooCommerce simple products and variations.
+- x402 completed webhook handling that creates a paid WooCommerce order without touching the normal hosted checkout session flow.
+
 ## [0.1.0] - 2026-05-14
 
 ### Added

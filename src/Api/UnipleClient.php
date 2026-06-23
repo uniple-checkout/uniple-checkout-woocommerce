@@ -154,6 +154,58 @@ final class UnipleClient
         return $data;
     }
 
+    /**
+     * @param array<int,array{
+     *   externalId:string,
+     *   name:string,
+     *   priceJpyc:string,
+     *   active:bool,
+     *   description?:string,
+     *   imageUrl?:string,
+     *   pageUrl?:string,
+     *   taxLabel?:string,
+     *   sortOrder?:int
+     * }> $products
+     *
+     * @return array<string,mixed>
+     */
+    public function syncProducts(array $products): array
+    {
+        if (count($products) > 200) {
+            throw new InvalidArgumentException('products max 200');
+        }
+        if ($this->config['api_key'] === '') {
+            throw new RuntimeException('uniple_api_key_not_configured');
+        }
+
+        $response = wp_remote_request($this->endpoint('/api/merchant/products'), [
+            'method' => 'PUT',
+            'headers' => $this->commonHeaders(['Content-Type' => 'application/json']),
+            'body' => (string) wp_json_encode(
+                ['products' => array_values($products)],
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            ),
+            'timeout' => self::TIMEOUT_SECONDS,
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('uniple_products_unreachable: '.esc_html((string) $response->get_error_message()));
+        }
+
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $raw = (string) wp_remote_retrieve_body($response);
+        $payload = json_decode($raw, true);
+        if ($status < 200 || $status >= 300 || !is_array($payload) || ($payload['ok'] ?? true) === false) {
+            throw new RuntimeException(
+                'uniple_products_failed: status='.esc_html((string) $status).' body='.esc_html((string) substr($raw, 0, 300))
+            );
+        }
+
+        $payload['httpStatus'] = $status;
+
+        return $payload;
+    }
+
     public function verifySignature(string $rawBody, string $sigHeader, ?string $secret = null): bool
     {
         $secret = $secret ?? $this->config['webhook_secret'];

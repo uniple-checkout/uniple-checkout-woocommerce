@@ -4,7 +4,7 @@ Tags: woocommerce, payment, checkout, stablecoin, japan
 Requires at least: 6.4
 Tested up to: 6.9
 Requires PHP: 8.1
-Stable tag: 0.1.2
+Stable tag: 0.1.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -97,6 +97,11 @@ No screenshots are included in this release.
 
 == Changelog ==
 
+= 0.1.3 =
+
+* Added manual x402 product catalog sync.
+* Added x402 completed webhook handling that creates a paid WooCommerce order.
+
 = 0.1.2 =
 
 * Added Japanese (ja) translation bundled in /languages.
@@ -116,6 +121,10 @@ No screenshots are included in this release.
 * Added masked admin fields for API key and webhook secret.
 
 == Upgrade Notice ==
+
+= 0.1.3 =
+
+Added x402 product sync and paid order creation for AI purchases.
 
 = 0.1.2 =
 

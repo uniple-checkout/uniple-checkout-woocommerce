@@ -13,5 +13,5 @@ timeline based on the severity.
 
 | Version | Supported |
 |---|---|
-| 0.1.2 | ✓ |
-| < 0.1.2 | ✗ (please upgrade) |
+| 0.1.3 | ✓ |
+| < 0.1.3 | ✗ (please upgrade) |

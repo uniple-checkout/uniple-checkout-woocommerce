@@ -23,6 +23,7 @@ namespace Uniple\CheckoutWooCommerce\Webhook;
 
 use Uniple\CheckoutWooCommerce\Api\UnipleClient;
 use Uniple\CheckoutWooCommerce\Gateway\UnipleGateway;
+use Uniple\CheckoutWooCommerce\Plugin;
 use WP_REST_Request;
 use WP_REST_Response;
 
@@ -83,6 +84,11 @@ final class WebhookController
         $sessionId = (string) ($data['sessionId'] ?? '');
         $clientReferenceId = (string) ($data['clientReferenceId'] ?? '');
         $txHash = (string) ($data['txHash'] ?? $data['transactionId'] ?? '');
+        $productSku = (string) ($data['productSku'] ?? $data['product_sku'] ?? '');
+
+        if ($type === 'checkout.session.completed' && $productSku !== '' && !self::matchesNormalCheckoutOrder($sessionId, $clientReferenceId)) {
+            return self::handleX402Completed($data, $type, $rawBody, $client);
+        }
 
         if (
             $type !== 'checkout.session.completed'
@@ -185,6 +191,95 @@ final class WebhookController
     }
 
     /**
+     * @param array<string,mixed> $data
+     */
+    private static function handleX402Completed(array $data, string $type, string $rawBody, UnipleClient $client): WP_REST_Response
+    {
+        $productSku = self::readPayloadString($data, ['productSku', 'product_sku']);
+        $amount = self::normalizeOrderAmount($data['amountJpyc'] ?? $data['amount_jpyc'] ?? null);
+        if ($productSku === '' || $amount === null) {
+            return new WP_REST_Response(['error' => 'x402_missing_required_field'], 400);
+        }
+
+        $product = self::findX402Product($productSku);
+        if (!$product instanceof \WC_Product) {
+            return new WP_REST_Response(['error' => 'product_not_found'], 404);
+        }
+
+        $sessionId = self::readPayloadString($data, ['sessionId', 'session_id']);
+        $merchantOrderId = self::readPayloadString($data, ['merchantOrderId', 'merchant_order_id']);
+        $clientReferenceId = self::readPayloadString($data, ['clientReferenceId', 'client_reference_id']);
+        $idempotencyRef = $sessionId !== ''
+            ? $sessionId
+            : ($merchantOrderId !== '' ? $merchantOrderId : ($clientReferenceId !== '' ? $clientReferenceId : hash('sha256', $rawBody)));
+        if (strlen($idempotencyRef) > 180) {
+            $idempotencyRef = hash('sha256', $idempotencyRef);
+        }
+        $idempotencyKey = $type.':'.$idempotencyRef;
+
+        $existing = wc_get_orders([
+            'limit' => 1,
+            'return' => 'ids',
+            'meta_key' => '_uniple_x402_idempotency_key',
+            'meta_value' => $idempotencyKey,
+        ]);
+        if (is_array($existing) && count($existing) > 0) {
+            return new WP_REST_Response(['ok' => true, 'duplicate' => true, 'orderId' => (int) $existing[0]], 200);
+        }
+
+        $lockKey = 'x402_'.hash('sha256', $idempotencyKey);
+        if (!self::acquireLockKey($lockKey)) {
+            return new WP_REST_Response(['ok' => true, 'queued' => true], 202);
+        }
+
+        try {
+            $txHash = self::readPayloadString($data, ['txHash', 'tx_hash', 'transactionId', 'transaction_id']);
+            $payer = self::readPayloadString($data, ['payer', 'from']);
+            $itemName = self::readPayloadString($data, ['itemName', 'item_name']);
+            $address = self::x402Address($data, $payer);
+
+            $order = wc_create_order(['created_via' => 'uniple-x402']);
+            if (!$order instanceof \WC_Order) {
+                return new WP_REST_Response(['error' => 'order_create_failed'], 500);
+            }
+
+            $order->set_payment_method(Plugin::PLUGIN_ID);
+            $order->set_payment_method_title(__('JPYC決済 (uniple checkout)', 'uniple-checkout-for-woocommerce'));
+            $order->set_address($address, 'billing');
+            $order->set_address($address, 'shipping');
+            $order->add_product($product, 1, [
+                'name' => $itemName !== '' ? $itemName : $product->get_name(),
+                'subtotal' => $amount,
+                'total' => $amount,
+            ]);
+            $order->set_currency('JPY');
+            $order->set_total((float) $amount);
+            $order->update_meta_data('_uniple_x402_idempotency_key', $idempotencyKey);
+            $order->update_meta_data('_uniple_x402_product_sku', $productSku);
+            $order->update_meta_data('_uniple_x402_merchant_order_id', $merchantOrderId);
+            $order->update_meta_data('_uniple_x402_client_reference_id', $clientReferenceId);
+            $order->update_meta_data('_uniple_x402_tx_hash', $txHash);
+            $order->update_meta_data('_uniple_x402_payer', $payer);
+            $order->add_order_note(self::x402OrderNote($productSku, $merchantOrderId, $clientReferenceId, $txHash, $payer));
+            if (!$order->is_paid()) {
+                $order->payment_complete($txHash !== '' ? $txHash : $idempotencyRef);
+            }
+            $order->save();
+        } catch (\Throwable $e) {
+            wc_get_logger()->error(
+                '[uniple-checkout] x402 order creation failed: '.$e->getMessage(),
+                ['source' => 'uniple-checkout', 'product_sku' => $productSku]
+            );
+
+            return new WP_REST_Response(['error' => 'x402_order_creation_failed'], 500);
+        } finally {
+            self::releaseLockKey($lockKey);
+        }
+
+        return new WP_REST_Response(['ok' => true, 'x402' => true, 'orderId' => $order->get_id()], 200);
+    }
+
+    /**
      * Atomic lock via wp_options.
      *
      * `add_option` は INSERT ... 失敗で false を返す原子操作なので、 set_transient より
@@ -192,7 +287,12 @@ final class WebhookController
      */
     private static function acquireLock(int $orderId): bool
     {
-        $key = self::LOCK_OPTION_PREFIX.$orderId;
+        return self::acquireLockKey((string) $orderId);
+    }
+
+    private static function acquireLockKey(string $suffix): bool
+    {
+        $key = self::lockOptionKey($suffix);
         $now = time();
         $payload = (string) $now;
 
@@ -213,7 +313,22 @@ final class WebhookController
 
     private static function releaseLock(int $orderId): void
     {
-        delete_option(self::LOCK_OPTION_PREFIX.$orderId);
+        self::releaseLockKey((string) $orderId);
+    }
+
+    private static function releaseLockKey(string $suffix): void
+    {
+        delete_option(self::lockOptionKey($suffix));
+    }
+
+    private static function lockOptionKey(string $suffix): string
+    {
+        $safe = preg_replace('/[^a-zA-Z0-9_.:-]/', '_', $suffix) ?? '';
+        if (strlen($safe) > 80) {
+            $safe = hash('sha256', $safe);
+        }
+
+        return self::LOCK_OPTION_PREFIX.$safe;
     }
 
     private static function resolveGateway(): ?UnipleGateway
@@ -225,5 +340,205 @@ final class WebhookController
         $gateway = $gateways['uniple'] ?? null;
 
         return $gateway instanceof UnipleGateway ? $gateway : null;
+    }
+
+    private static function matchesNormalCheckoutOrder(string $sessionId, string $clientReferenceId): bool
+    {
+        if ($sessionId === '' || $clientReferenceId === '' || !ctype_digit($clientReferenceId)) {
+            return false;
+        }
+        $order = wc_get_order((int) $clientReferenceId);
+        if (!$order instanceof \WC_Order) {
+            return false;
+        }
+        $storedSessionId = (string) $order->get_meta('_uniple_session_id', true);
+
+        return $storedSessionId !== '' && hash_equals($storedSessionId, $sessionId);
+    }
+
+    private static function findX402Product(string $productSku): ?\WC_Product
+    {
+        if (preg_match('/^woocommerce-product-(\d+)-variation-(\d+)$/', $productSku, $m)) {
+            $variation = wc_get_product((int) $m[2]);
+            if (!$variation instanceof \WC_Product_Variation || (int) $variation->get_parent_id() !== (int) $m[1]) {
+                return null;
+            }
+
+            return $variation;
+        }
+
+        if (preg_match('/^woocommerce-product-(\d+)$/', $productSku, $m)) {
+            $product = wc_get_product((int) $m[1]);
+
+            return $product instanceof \WC_Product ? $product : null;
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string,mixed> $data
+     * @param array<int,string>   $keys
+     */
+    private static function readPayloadString(array $data, array $keys): string
+    {
+        foreach ($keys as $key) {
+            if (isset($data[$key]) && is_scalar($data[$key])) {
+                return trim((string) $data[$key]);
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * @param array<string,mixed> $data
+     *
+     * @return array<string,string>
+     */
+    private static function x402Address(array $data, string $payer): array
+    {
+        $shipping = self::x402ShippingPayload($data);
+        [$fallbackLastName, $fallbackFirstName] = self::x402BuyerName($data, $payer);
+
+        $firstName = self::readPayloadString($shipping, ['firstName', 'first_name', 'givenName', 'given_name', 'name02']);
+        $lastName = self::readPayloadString($shipping, ['lastName', 'last_name', 'familyName', 'family_name', 'name01']);
+        $fullName = self::readPayloadString($shipping, ['name', 'fullName', 'full_name', 'recipientName', 'recipient_name', 'shippingName', 'shipping_name']);
+        if (($firstName === '' || $lastName === '') && $fullName !== '') {
+            $parts = preg_split('/\s+/u', $fullName, 2, PREG_SPLIT_NO_EMPTY) ?: [];
+            if ($lastName === '') {
+                $lastName = (string) ($parts[0] ?? '');
+            }
+            if ($firstName === '') {
+                $firstName = (string) ($parts[1] ?? '');
+            }
+        }
+        if ($lastName === '') {
+            $lastName = $fallbackLastName;
+        }
+        if ($firstName === '') {
+            $firstName = $fallbackFirstName;
+        }
+
+        $city = self::readPayloadString($shipping, ['city', 'municipality', 'ward']);
+        $address1 = self::readPayloadString($shipping, ['addr01', 'address1', 'address_1', 'addressLine1', 'address_line1', 'line1', 'streetAddress', 'street_address']);
+        $address2 = self::readPayloadString($shipping, ['addr02', 'address2', 'address_2', 'addressLine2', 'address_line2', 'line2', 'building', 'apartment', 'room']);
+        $phone = self::readPayloadString($shipping, ['phoneNumber', 'phone_number', 'phone', 'tel', 'telephone']);
+        $postcode = self::readPayloadString($shipping, ['postalCode', 'postal_code', 'postCode', 'post_code', 'zipCode', 'zip_code', 'zipcode', 'zip']);
+        $state = self::normalizePrefName(self::readPayloadString($shipping, ['pref', 'prefecture', 'state', 'province', 'region']));
+
+        return [
+            'first_name' => mb_substr($firstName, 0, 255),
+            'last_name' => mb_substr($lastName, 0, 255),
+            'email' => mb_substr(self::readPayloadString($shipping, ['email', 'mail']) ?: 'x402-agent@uniple.local', 0, 255),
+            'phone' => mb_substr($phone !== '' ? $phone : '0000000000', 0, 32),
+            'address_1' => mb_substr(trim($city.' '.$address1) ?: 'x402', 0, 255),
+            'address_2' => mb_substr($address2 !== '' ? $address2 : 'AI purchase', 0, 255),
+            'postcode' => mb_substr($postcode !== '' ? $postcode : '0000000', 0, 32),
+            'city' => mb_substr($city !== '' ? $city : 'x402', 0, 255),
+            'state' => mb_substr($state !== '' ? $state : '東京都', 0, 255),
+            'country' => 'JP',
+        ];
+    }
+
+    /**
+     * @param array<string,mixed> $data
+     *
+     * @return array<string,mixed>
+     */
+    private static function x402ShippingPayload(array $data): array
+    {
+        foreach (['shipping', 'shippingAddress', 'shipping_address', 'delivery', 'recipient'] as $key) {
+            if (isset($data[$key]) && is_array($data[$key])) {
+                return $data[$key];
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @param array<string,mixed> $data
+     *
+     * @return array{0:string,1:string}
+     */
+    private static function x402BuyerName(array $data, string $payer): array
+    {
+        $raw = self::readPayloadString($data, ['buyerName', 'buyer_name', 'name']);
+        if ($raw === '' && $payer !== '') {
+            $raw = 'x402 '.substr($payer, 0, 12);
+        }
+        if ($raw === '') {
+            return ['x402', 'Buyer'];
+        }
+
+        $parts = preg_split('/\s+/u', $raw, 2, PREG_SPLIT_NO_EMPTY) ?: [];
+        return [
+            mb_substr((string) ($parts[0] ?? 'x402'), 0, 255),
+            mb_substr((string) ($parts[1] ?? 'Buyer'), 0, 255),
+        ];
+    }
+
+    private static function normalizePrefName(string $prefName): string
+    {
+        $prefName = trim($prefName);
+        $map = [
+            'tokyo' => '東京都',
+            'tokyo-to' => '東京都',
+            'osaka' => '大阪府',
+            'osaka-fu' => '大阪府',
+            'kyoto' => '京都府',
+            'kyoto-fu' => '京都府',
+            'hokkaido' => '北海道',
+            'kanagawa' => '神奈川県',
+            'saitama' => '埼玉県',
+            'chiba' => '千葉県',
+            'aichi' => '愛知県',
+            'fukuoka' => '福岡県',
+        ];
+        $key = strtolower(str_replace([' ', '_'], '-', $prefName));
+
+        return $map[$key] ?? $prefName;
+    }
+
+    private static function x402OrderNote(string $productSku, string $merchantOrderId, string $clientReferenceId, string $txHash, string $payer): string
+    {
+        $lines = [
+            'uniple x402 purchase',
+            'productSku: '.$productSku,
+        ];
+        if ($merchantOrderId !== '') {
+            $lines[] = 'merchantOrderId: '.$merchantOrderId;
+        }
+        if ($clientReferenceId !== '') {
+            $lines[] = 'clientReferenceId: '.$clientReferenceId;
+        }
+        if ($txHash !== '') {
+            $lines[] = 'txHash: '.$txHash;
+        }
+        if ($payer !== '') {
+            $lines[] = 'payer: '.$payer;
+        }
+
+        return mb_substr(implode("\n", $lines), 0, 4000);
+    }
+
+    private static function normalizeOrderAmount(mixed $value): ?string
+    {
+        if ($value === null || $value === '' || $value === false) {
+            return null;
+        }
+        $s = trim((string) $value);
+        if (!preg_match('/^(\d+)(?:\.(\d{1,6}))?$/', $s, $m)) {
+            return null;
+        }
+        $integer = ltrim($m[1], '0');
+        $integer = $integer === '' ? '0' : $integer;
+        $fraction = isset($m[2]) ? rtrim($m[2], '0') : '';
+        if ($integer === '0' && $fraction === '') {
+            return null;
+        }
+
+        return $fraction === '' ? $integer : $integer.'.'.$fraction;
     }
 }
