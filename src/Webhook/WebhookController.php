@@ -24,6 +24,8 @@ namespace Uniple\CheckoutWooCommerce\Webhook;
 use Uniple\CheckoutWooCommerce\Api\UnipleClient;
 use Uniple\CheckoutWooCommerce\Gateway\UnipleGateway;
 use Uniple\CheckoutWooCommerce\Plugin;
+use Uniple\CheckoutWooCommerce\X402\ProductResolver;
+use Uniple\CheckoutWooCommerce\X402\QuoteStore;
 use WP_REST_Request;
 use WP_REST_Response;
 
@@ -201,7 +203,7 @@ final class WebhookController
             return new WP_REST_Response(['error' => 'x402_missing_required_field'], 400);
         }
 
-        $product = self::findX402Product($productSku);
+        $product = ProductResolver::findBySku($productSku);
         if (!$product instanceof \WC_Product) {
             return new WP_REST_Response(['error' => 'product_not_found'], 404);
         }
@@ -227,6 +229,34 @@ final class WebhookController
             return new WP_REST_Response(['ok' => true, 'duplicate' => true, 'orderId' => (int) $existing[0]], 200);
         }
 
+        $quoteId = self::readPayloadString($data, ['quoteId', 'quote_id']);
+        $quote = null;
+        $quantity = 1;
+        $productSubtotal = $amount;
+        $shippingFee = '0';
+        $discount = '0';
+        $total = $amount;
+        if ($quoteId !== '') {
+            $quote = QuoteStore::find($quoteId);
+            if ($quote === null) {
+                return new WP_REST_Response(['error' => 'quote_not_found'], 400);
+            }
+            $quoteError = self::validateQuote($quote, $data, $productSku, $amount, $product);
+            if ($quoteError !== null) {
+                wc_get_logger()->warning(
+                    '[uniple-checkout] x402 quote validation failed',
+                    ['source' => 'uniple-checkout', 'product_sku' => $productSku, 'error' => $quoteError]
+                );
+
+                return new WP_REST_Response(['error' => $quoteError], 400);
+            }
+            $quantity = (int) $quote['quantity'];
+            $productSubtotal = (string) $quote['productSubtotalJpyc'];
+            $shippingFee = (string) $quote['shippingFeeJpyc'];
+            $discount = (string) $quote['discountJpyc'];
+            $total = (string) $quote['totalJpyc'];
+        }
+
         $lockKey = 'x402_'.hash('sha256', $idempotencyKey);
         if (!self::acquireLockKey($lockKey)) {
             return new WP_REST_Response(['ok' => true, 'queued' => true], 202);
@@ -236,7 +266,11 @@ final class WebhookController
             $txHash = self::readPayloadString($data, ['txHash', 'tx_hash', 'transactionId', 'transaction_id']);
             $payer = self::readPayloadString($data, ['payer', 'from']);
             $itemName = self::readPayloadString($data, ['itemName', 'item_name']);
-            $address = self::x402Address($data, $payer);
+            $addressData = $data;
+            if (is_array($quote['shipping'] ?? null)) {
+                $addressData['shipping'] = $quote['shipping'];
+            }
+            $address = self::x402Address($addressData, $payer);
 
             $order = wc_create_order(['created_via' => 'uniple-x402']);
             if (!$order instanceof \WC_Order) {
@@ -247,24 +281,44 @@ final class WebhookController
             $order->set_payment_method_title(__('JPYC決済 (uniple checkout)', 'uniple-checkout-for-woocommerce'));
             $order->set_address($address, 'billing');
             $order->set_address($address, 'shipping');
-            $order->add_product($product, 1, [
+            $unitPrice = self::unitPriceFromSubtotal($productSubtotal, $quantity);
+            if ($unitPrice === null) {
+                return new WP_REST_Response(['error' => 'quote_amount_mismatch'], 400);
+            }
+            $order->add_product($product, $quantity, [
                 'name' => $itemName !== '' ? $itemName : $product->get_name(),
-                'subtotal' => $amount,
-                'total' => $amount,
+                'subtotal' => $productSubtotal,
+                'total' => $productSubtotal,
             ]);
+            if ((int) $shippingFee > 0) {
+                $shippingItem = new \WC_Order_Item_Shipping();
+                $shippingItem->set_method_title((string) ($quote['shippingRateLabel'] ?? __('送料', 'uniple-checkout-for-woocommerce')));
+                $shippingItem->set_method_id((string) ($quote['shippingRateId'] ?? 'uniple_x402_shipping'));
+                $shippingItem->set_total($shippingFee);
+                $order->add_item($shippingItem);
+            }
             $order->set_currency('JPY');
-            $order->set_total((float) $amount);
+            $order->set_discount_total((float) $discount);
+            $order->set_shipping_total((float) $shippingFee);
+            $order->set_total((float) $total);
             $order->update_meta_data('_uniple_x402_idempotency_key', $idempotencyKey);
             $order->update_meta_data('_uniple_x402_product_sku', $productSku);
+            $order->update_meta_data('_uniple_x402_quote_id', $quoteId);
+            $order->update_meta_data('_uniple_x402_product_subtotal_jpyc', $productSubtotal);
+            $order->update_meta_data('_uniple_x402_shipping_fee_jpyc', $shippingFee);
+            $order->update_meta_data('_uniple_x402_total_jpyc', $total);
             $order->update_meta_data('_uniple_x402_merchant_order_id', $merchantOrderId);
             $order->update_meta_data('_uniple_x402_client_reference_id', $clientReferenceId);
             $order->update_meta_data('_uniple_x402_tx_hash', $txHash);
             $order->update_meta_data('_uniple_x402_payer', $payer);
-            $order->add_order_note(self::x402OrderNote($productSku, $merchantOrderId, $clientReferenceId, $txHash, $payer));
+            $order->add_order_note(self::x402OrderNote($productSku, $merchantOrderId, $clientReferenceId, $txHash, $payer, $quoteId, $shippingFee, $total));
             if (!$order->is_paid()) {
                 $order->payment_complete($txHash !== '' ? $txHash : $idempotencyRef);
             }
             $order->save();
+            if ($quote !== null) {
+                QuoteStore::markUsed($quoteId);
+            }
         } catch (\Throwable $e) {
             wc_get_logger()->error(
                 '[uniple-checkout] x402 order creation failed: '.$e->getMessage(),
@@ -277,6 +331,46 @@ final class WebhookController
         }
 
         return new WP_REST_Response(['ok' => true, 'x402' => true, 'orderId' => $order->get_id()], 200);
+    }
+
+    /**
+     * @param array<string,mixed> $quote
+     * @param array<string,mixed> $data
+     */
+    private static function validateQuote(array $quote, array $data, string $productSku, string $amount, \WC_Product $product): ?string
+    {
+        if (!empty($quote['usedAt'])) {
+            return 'quote_already_used';
+        }
+        if (strtotime((string) ($quote['expiresAt'] ?? '')) <= time()) {
+            return 'quote_expired';
+        }
+        if ((string) ($quote['productSku'] ?? '') !== $productSku || (int) ($quote['productId'] ?? 0) !== (int) $product->get_id()) {
+            return 'quote_product_mismatch';
+        }
+        if ((string) ($quote['totalJpyc'] ?? '') !== $amount) {
+            return 'quote_amount_mismatch';
+        }
+
+        $quantity = self::readPayloadString($data, ['quantity', 'qty']);
+        if ($quantity !== '' && (!ctype_digit($quantity) || (int) $quantity !== (int) $quote['quantity'])) {
+            return 'quote_quantity_mismatch';
+        }
+
+        $subtotal = self::readPayloadAmount($data, ['productSubtotalJpyc', 'product_subtotal_jpyc']);
+        if ($subtotal !== null && $subtotal !== (string) $quote['productSubtotalJpyc']) {
+            return 'quote_product_subtotal_mismatch';
+        }
+        $shippingFee = self::readPayloadAmount($data, ['shippingFeeJpyc', 'shipping_fee_jpyc']);
+        if ($shippingFee !== null && $shippingFee !== (string) $quote['shippingFeeJpyc']) {
+            return 'quote_shipping_fee_mismatch';
+        }
+        $total = self::readPayloadAmount($data, ['totalJpyc', 'total_jpyc']);
+        if ($total !== null && $total !== (string) $quote['totalJpyc']) {
+            return 'quote_total_mismatch';
+        }
+
+        return null;
     }
 
     /**
@@ -356,26 +450,6 @@ final class WebhookController
         return $storedSessionId !== '' && hash_equals($storedSessionId, $sessionId);
     }
 
-    private static function findX402Product(string $productSku): ?\WC_Product
-    {
-        if (preg_match('/^woocommerce-product-(\d+)-variation-(\d+)$/', $productSku, $m)) {
-            $variation = wc_get_product((int) $m[2]);
-            if (!$variation instanceof \WC_Product_Variation || (int) $variation->get_parent_id() !== (int) $m[1]) {
-                return null;
-            }
-
-            return $variation;
-        }
-
-        if (preg_match('/^woocommerce-product-(\d+)$/', $productSku, $m)) {
-            $product = wc_get_product((int) $m[1]);
-
-            return $product instanceof \WC_Product ? $product : null;
-        }
-
-        return null;
-    }
-
     /**
      * @param array<string,mixed> $data
      * @param array<int,string>   $keys
@@ -425,7 +499,7 @@ final class WebhookController
         $address2 = self::readPayloadString($shipping, ['addr02', 'address2', 'address_2', 'addressLine2', 'address_line2', 'line2', 'building', 'apartment', 'room']);
         $phone = self::readPayloadString($shipping, ['phoneNumber', 'phone_number', 'phone', 'tel', 'telephone']);
         $postcode = self::readPayloadString($shipping, ['postalCode', 'postal_code', 'postCode', 'post_code', 'zipCode', 'zip_code', 'zipcode', 'zip']);
-        $state = self::normalizePrefName(self::readPayloadString($shipping, ['pref', 'prefecture', 'state', 'province', 'region']));
+        $state = self::normalizePrefName(self::readPayloadString($shipping, ['state', 'pref', 'prefName', 'pref_name', 'prefecture', 'province', 'region']));
 
         return [
             'first_name' => mb_substr($firstName, 0, 255),
@@ -501,12 +575,23 @@ final class WebhookController
         return $map[$key] ?? $prefName;
     }
 
-    private static function x402OrderNote(string $productSku, string $merchantOrderId, string $clientReferenceId, string $txHash, string $payer): string
-    {
+    private static function x402OrderNote(
+        string $productSku,
+        string $merchantOrderId,
+        string $clientReferenceId,
+        string $txHash,
+        string $payer,
+        string $quoteId = '',
+        string $shippingFeeJpyc = '',
+        string $totalJpyc = ''
+    ): string {
         $lines = [
             'uniple x402 purchase',
             'productSku: '.$productSku,
         ];
+        if ($quoteId !== '') {
+            $lines[] = 'quoteId: '.$quoteId;
+        }
         if ($merchantOrderId !== '') {
             $lines[] = 'merchantOrderId: '.$merchantOrderId;
         }
@@ -519,13 +604,19 @@ final class WebhookController
         if ($payer !== '') {
             $lines[] = 'payer: '.$payer;
         }
+        if ($shippingFeeJpyc !== '') {
+            $lines[] = 'shippingFeeJpyc: '.$shippingFeeJpyc;
+        }
+        if ($totalJpyc !== '') {
+            $lines[] = 'totalJpyc: '.$totalJpyc;
+        }
 
         return mb_substr(implode("\n", $lines), 0, 4000);
     }
 
     private static function normalizeOrderAmount(mixed $value): ?string
     {
-        if ($value === null || $value === '' || $value === false) {
+        if ($value === null || $value === '' || $value === false || !is_scalar($value)) {
             return null;
         }
         $s = trim((string) $value);
@@ -540,5 +631,57 @@ final class WebhookController
         }
 
         return $fraction === '' ? $integer : $integer.'.'.$fraction;
+    }
+
+    /**
+     * @param array<string,mixed> $data
+     * @param array<int,string>   $keys
+     */
+    private static function readPayloadAmount(array $data, array $keys): ?string
+    {
+        foreach ($keys as $key) {
+            if (array_key_exists($key, $data)) {
+                $amount = self::normalizeQuoteAmount($data[$key]);
+
+                return $amount === null ? '__invalid__' : $amount;
+            }
+        }
+
+        return null;
+    }
+
+    private static function normalizeQuoteAmount(mixed $value): ?string
+    {
+        if ($value === null || $value === '' || $value === false || !is_scalar($value)) {
+            return null;
+        }
+        $s = trim((string) $value);
+        if (!preg_match('/^(\d+)(?:\.(\d{1,6}))?$/', $s, $m)) {
+            return null;
+        }
+        $integer = ltrim($m[1], '0');
+        $integer = $integer === '' ? '0' : $integer;
+        $fraction = isset($m[2]) ? rtrim($m[2], '0') : '';
+
+        return $fraction === '' ? $integer : $integer.'.'.$fraction;
+    }
+
+    private static function unitPriceFromSubtotal(string $productSubtotal, int $quantity): ?string
+    {
+        if ($quantity < 1) {
+            return null;
+        }
+        if ($quantity === 1) {
+            return $productSubtotal;
+        }
+        if (!ctype_digit($productSubtotal)) {
+            return null;
+        }
+        $subtotal = (int) $productSubtotal;
+        if ($subtotal % $quantity !== 0) {
+            return null;
+        }
+
+        return (string) intdiv($subtotal, $quantity);
     }
 }

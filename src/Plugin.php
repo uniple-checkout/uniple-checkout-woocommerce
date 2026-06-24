@@ -24,6 +24,7 @@ namespace Uniple\CheckoutWooCommerce;
 use Uniple\CheckoutWooCommerce\Gateway\UnipleBlockSupport;
 use Uniple\CheckoutWooCommerce\Gateway\UnipleGateway;
 use Uniple\CheckoutWooCommerce\ReturnUrl\ReturnController;
+use Uniple\CheckoutWooCommerce\Webhook\QuoteController;
 use Uniple\CheckoutWooCommerce\Webhook\WebhookController;
 
 defined('ABSPATH') || exit;
@@ -45,6 +46,7 @@ final class Plugin
             [self::class, 'registerBlockSupport']
         );
         add_action('rest_api_init', [WebhookController::class, 'registerRoutes']);
+        add_action('rest_api_init', [QuoteController::class, 'registerRoutes']);
         add_action('woocommerce_api_uniple_return', [ReturnController::class, 'handle']);
 
         // Cross-device thank-you support (= cf. ReturnController::handle())。
