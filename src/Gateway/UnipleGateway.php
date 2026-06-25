@@ -268,8 +268,9 @@ final class UnipleGateway extends WC_Payment_Gateway
                 $checked = !empty($product['aiEnabled']) ? ' checked="checked"' : '';
                 $price = $product['priceJpyc'] !== '' ? esc_html($product['priceJpyc'].' JPYC') : '同期対象外';
                 $status = !empty($product['ecActive']) ? '有効' : '無効';
+                $ecActive = !empty($product['ecActive']) ? '1' : '0';
                 $rows .= '<tr>'
-                    .'<td><input type="checkbox" name="'.$checkboxName.'[]" value="'.esc_attr($product['externalId']).'"'.$checked.' /></td>'
+                    .'<td><input type="checkbox" class="uniple-x402-ai-target" data-ec-active="'.esc_attr($ecActive).'" name="'.$checkboxName.'[]" value="'.esc_attr($product['externalId']).'"'.$checked.' /></td>'
                     .'<td>'.esc_html($product['name']).'<br><code>'.esc_html($product['externalId']).'</code></td>'
                     .'<td>'.$price.'</td>'
                     .'<td>'.esc_html($status).'</td>'
@@ -285,10 +286,24 @@ final class UnipleGateway extends WC_Payment_Gateway
             .'<p>WooCommerceの商品マスタをunipleの商品catalogへ同期します。公開中・購入可能・在庫ありの商品は「有効」として同期されます。</p>'
             .'<p class="description">通常のHosted Checkout / LINE / WalletConnect決済フローは変更されません。</p>'
             .'<button type="submit" class="button" name="'.$buttonName.'" value="1">x402商品同期</button>'
+            .'<p style="margin:12px 0 0;">'
+            .'<button type="button" class="button" onclick="unipleX402SetAiTarget(\'all\')">全て選択</button> '
+            .'<button type="button" class="button" onclick="unipleX402SetAiTarget(\'none\')">全て解除</button> '
+            .'<button type="button" class="button" onclick="unipleX402SetAiTarget(\'ec_active\')">EC側で有効な商品だけ選択</button>'
+            .'</p>'
             .'<table class="widefat striped" style="margin-top:12px; max-width:960px;">'
             .'<thead><tr><th>AI購入対象</th><th>商品/バリエーション</th><th>価格</th><th>EC状態</th></tr></thead>'
             .'<tbody>'.$rows.'</tbody></table>'
             .'<p><button type="submit" class="button" name="'.$saveName.'" value="1">AI購入対象設定を保存</button></p>'
+            .'<script>'
+            .'function unipleX402SetAiTarget(mode){'
+            .'document.querySelectorAll(".uniple-x402-ai-target").forEach(function(checkbox){'
+            .'if(mode==="all"){checkbox.checked=true;}'
+            .'else if(mode==="none"){checkbox.checked=false;}'
+            .'else if(mode==="ec_active"){checkbox.checked=checkbox.getAttribute("data-ec-active")==="1";}'
+            .'});'
+            .'}'
+            .'</script>'
             .'</td></tr>';
     }
 

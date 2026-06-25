@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-06-25
+
+### Added
+
+- Bulk controls for x402 AI purchase target checkboxes: select all, clear all, and select only EC-active products.
+
 ## [0.1.5] - 2026-06-25
 
 ### Added

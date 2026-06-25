@@ -4,7 +4,7 @@ Tags: woocommerce, payment, checkout, stablecoin, japan
 Requires at least: 6.4
 Tested up to: 6.9
 Requires PHP: 8.1
-Stable tag: 0.1.5
+Stable tag: 0.1.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -98,6 +98,10 @@ No screenshots are included in this release.
 
 == Changelog ==
 
+= 0.1.6 =
+
+* Added bulk controls for x402 AI purchase target checkboxes.
+
 = 0.1.5 =
 
 * Added per-product / per-variation AI purchase target settings for x402 sync.
@@ -132,6 +136,10 @@ No screenshots are included in this release.
 * Added masked admin fields for API key and webhook secret.
 
 == Upgrade Notice ==
+
+= 0.1.6 =
+
+Adds select all, clear all, and EC-active only controls for AI purchase target settings.
 
 = 0.1.5 =
 
