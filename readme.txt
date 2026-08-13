@@ -2,7 +2,7 @@
 Contributors: uniple
 Tags: woocommerce, payment, checkout, stablecoin, japan
 Requires at least: 6.4
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 8.1
 Stable tag: 0.1.12
 License: GPLv2 or later
